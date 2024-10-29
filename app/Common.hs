@@ -14,20 +14,20 @@ bufSize :: Int
 bufSize = 1024
 
 class Agent a where
-  connection :: a -> IO Handle
+  connection :: a -> Handle
   disconnect :: a -> IO ()
   setNick :: a -> (String -> IO ())
   gotMessage :: a -> (String -> IO ())
 
-listenUserIn :: (ByteString -> IO ()) -> IO ()
-listenUserIn postMessage =
+runListener :: (ByteString -> IO ()) -> IO ()
+runListener postMessage =
   forever $ do
     message <- fmap BS.pack getLine
     postMessage message
 
 runAgent :: (Agent a) => a -> IO ()
 runAgent agent = do
-  message <- connection agent >>= BS.hGetLine >>= (return . BS.unpack)
+  message <- fmap BS.unpack $ BS.hGetLine (connection agent)
   go $ words message
  where
   go [] = disconnect agent
