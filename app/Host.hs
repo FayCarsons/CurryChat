@@ -90,9 +90,14 @@ runHost port =
     _ <- forkIO $ Common.runAgent (Listener server)
     forever $ do
       (clientSock, clientAddr) <- accept sock
+      atomically $ modifyTVar activeClients succ
       active <- atomically $ readTVar activeClients
-      let client = Client{clientId = active, clientNick = "client " ++ show active, conn = clientSock}
-      _ <- atomically $ modifyTVar activeClients succ
+      let client =
+            Client
+              { clientId = active
+              , clientNick = "client " ++ show active
+              , conn = clientSock
+              }
       _ <- atomically $ modifyTVar clients (Map.insert (clientId client) client)
       putStrLn $ "Got client: " ++ show clientAddr
       forkIO . forever $ Common.runAgent (Handler client server)
