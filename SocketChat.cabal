@@ -70,7 +70,7 @@ executable SocketChat
 
     -- Other library packages from which modules are imported.
     build-depends:    base ^>=4.20.0.0,
-                      network ^>= 3.1.2,
+                      network ^>= 3.1.4.0,
                       stm ^>= 2.5.3.1,
                       containers ^>= 0.7,
                       bytestring

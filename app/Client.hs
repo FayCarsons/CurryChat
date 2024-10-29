@@ -4,13 +4,14 @@ module Client (runClient) where
 
 import Common
 import Control.Exception (bracket)
+import GHC.IO.IOMode (IOMode (ReadWriteMode))
 import Network.Socket
 import Network.Socket.ByteString
 
-data Client = Client Socket
+data Client = Client !Socket
 instance Agent Client where
-  connection (Client sock) = sock
-  disconnect _ = putStrLn "Disconnected! goobye :3"
+  connection (Client sock) = socketToHandle sock ReadWriteMode
+  disconnect _ = return ()
   setNick _ = const $ return ()
   gotMessage _ = putStrLn
 
@@ -26,8 +27,7 @@ runClient uri port =
     )
     close
     ( \sock -> do
-        let client = Client sock
-        let post msg = sendAll sock msg
-        listenUserIn post
-        handleMessage client
+        let postMessage = sendAll sock
+        Common.listenUserIn postMessage
+        Common.runAgent (Client sock)
     )

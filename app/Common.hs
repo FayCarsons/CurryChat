@@ -3,9 +3,9 @@
 module Common where
 
 import Control.Monad (forever)
-import Data.ByteString.Char8 (ByteString, pack, unpack)
-import Network.Socket (Socket)
-import Network.Socket.ByteString (recv)
+import Data.ByteString.Char8 (ByteString)
+import qualified Data.ByteString.Char8 as BS
+import System.IO (Handle)
 
 backlog :: Int
 backlog = 10
@@ -14,7 +14,7 @@ bufSize :: Int
 bufSize = 1024
 
 class Agent a where
-  connection :: a -> Socket
+  connection :: a -> IO Handle
   disconnect :: a -> IO ()
   setNick :: a -> (String -> IO ())
   gotMessage :: a -> (String -> IO ())
@@ -22,17 +22,17 @@ class Agent a where
 listenUserIn :: (ByteString -> IO ()) -> IO ()
 listenUserIn postMessage =
   forever $ do
-    message <- fmap pack getLine
+    message <- fmap BS.pack getLine
     postMessage message
 
-handleMessage :: (Agent a) => a -> IO ()
-handleMessage agent = do
-  message <- recv (connection agent) bufSize
-  go $ words $ unpack message
+runAgent :: (Agent a) => a -> IO ()
+runAgent agent = do
+  message <- connection agent >>= BS.hGetLine >>= (return . BS.unpack)
+  go $ words message
  where
   go [] = disconnect agent
   go ("/quit" : _) = disconnect agent
   go ("/setNick" : nick : _) = do
     setNick agent nick
-    handleMessage agent
+    runAgent agent
   go msg = gotMessage agent (unwords msg)
