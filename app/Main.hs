@@ -7,11 +7,10 @@
 module Main where
 
 import Control.Concurrent.Async (async)
-import qualified Control.Concurrent.Async as Async
 import Control.Concurrent.STM
 import Control.Monad (forM_)
 import Control.Monad.Fix (fix)
-import Data.ByteString.Char8 (ByteString, pack, unpack)
+import Data.ByteString.Char8 (ByteString)
 import qualified Data.ByteString.Char8 as BS
 import Data.List (findIndex)
 import Data.Map (Map)
@@ -19,7 +18,7 @@ import qualified Data.Map as Map
 import GHC.Base (failIO)
 import Network.Socket
 import Options.Applicative
-import System.IO (BufferMode (NoBuffering), Handle, IOMode (ReadWriteMode), hClose, hFlush, hGetLine, hPutStrLn, hSetBuffering, stdin, stdout)
+import System.IO (BufferMode (NoBuffering), Handle, IOMode (ReadWriteMode), hClose, hFlush, hGetLine, hSetBuffering, stdin, stdout)
 import Text.Read (readEither, readMaybe)
 
 appHeader :: String
@@ -41,7 +40,11 @@ appHeader =
     , "     ╚═════╝╚═╝  ╚═╝╚═╝  ╚═╝   ╚═╝             "
     , "                                                "
     ]
+
+backlog :: Int
 backlog = 1
+
+bufSize :: Int
 bufSize = 1024
 
 data Message
@@ -129,19 +132,13 @@ parseMessage message =
       "/showNick" : _ -> ShowNick
       msg -> GotMessage $ BS.pack (unwords msg)
 
-unparseMessage :: Message -> String
-unparseMessage Quit = "/quit"
-unparseMessage (SetNick nick) = "/setNick " ++ (BS.unpack nick)
-unparseMessage ShowNick = "/showNick"
-unparseMessage (GotMessage msg) = BS.unpack msg
-
 runClient :: String -> Int -> IO ()
 runClient uri port = do
   sock <- socket AF_INET Stream defaultProtocol
   let hints = defaultHints{addrSocketType = Stream}
   addr : _ <- getAddrInfo (Just hints) (Just uri) (Just $ show port)
   connect sock $ addrAddress addr
-  putStrLn $ "Connected to host: " ++ (show addr)
+  putStrLn $ "Connected to host: " ++ (show $ addrAddress addr)
   conn <- socketToHandle sock ReadWriteMode
   hSetBuffering conn NoBuffering
   let postMessage msg = BS.hPutStrLn conn msg
@@ -152,11 +149,14 @@ runClient uri port = do
         hClose conn
         return ()
       msg -> postMessage (BS.pack msg) *> loop
-  fix $ \loop ->
-    ( BS.hGetLine conn
-        >>= BS.putStrLn
-    )
-      *> loop
+  fix $ handleConn conn
+ where
+  handleConn conn continuation = do
+    line <- BS.hGetLine conn
+    if BS.null line
+      then
+        putStrLn "Connection closed :3"
+      else BS.putStrLn line *> continuation
 
 runHost :: Int -> IO ()
 runHost port = do
@@ -242,15 +242,14 @@ handleMessage server@Server{clientMetadata, clients} (FromClient clientId messag
         Nothing -> failIO $ "Cannot find nick for client " ++ (show clientId)
     GotMessage msg -> do
       metadata <- (atomically $ readTVar clientMetadata)
-      nick <- case Map.lookup clientId metadata of
-        Just (Just nick) -> return nick
+      withNick <- case Map.lookup clientId metadata of
+        Just (Just nick) -> return $ BS.concat [nick, BS.pack ": ", msg]
         Just Nothing -> return msg
         Nothing -> failIO "Cannot find client nick"
-      let msg' = BS.concat [nick, BS.pack ": ", msg]
-      BS.putStrLn msg'
+      BS.putStrLn withNick
       hFlush stdout
       withoutSender <- Map.delete clientId <$> (atomically $ readTVar clients)
-      forM_ (Map.elems withoutSender) $ \Connection{conn} -> BS.hPutStrLn conn msg'
+      forM_ (Map.elems withoutSender) $ \Connection{conn} -> BS.hPutStrLn conn withNick
 
 handleClient :: TQueue MessageSource -> Connection -> IO ()
 handleClient mailbox Connection{conn, clientId} = do
