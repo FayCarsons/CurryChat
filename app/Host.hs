@@ -1,7 +1,6 @@
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE NamedFieldPuns #-}
 {-# LANGUAGE OverloadedStrings #-}
-{-# LANGUAGE RecordPuns #-}
 
 module Host (runHost) where
 
@@ -94,51 +93,62 @@ broadcast Server{clients} except message = do
   forM_ withoutSender $ \Connection{conn} -> BS.hPutStrLn conn message
 
 handleMessage :: Server -> MessageSource -> IO ()
-handleMessage server@Server{hostNick, clients} (FromHost message) =
+handleMessage server (FromHost message) = handleServerMessage server message
+handleMessage server (FromClient clientId message) = handleClientMessage server clientId message
+
+handleServerMessage :: Server -> Message -> IO ()
+handleServerMessage server@Server{hostNick, clients} message =
   case message of
     Quit -> do
-      broadcast server Nothing (BS.pack "Host closed room, byebye :P")
+      nick <- atomically $ readTVar hostNick
+      broadcast server Nothing (BS.concat [nick, BS.pack "(host) closed room, byebye :P"])
       clients' <- Map.elems <$> (atomically $ readTVar clients)
-      forM_ clients' $
-        \Connection{conn} -> BS.hPutStrLn conn (BS.pack "Host closed room, byebye :P") *> hClose conn
+      forM_ clients' $ \Connection{conn} -> BS.hPutStrLn conn (BS.pack "Host closed room, byebye :P") *> hClose conn
     SetNick nick -> atomically $ modifyTVar hostNick (const nick)
     ShowNick -> (atomically $ readTVar hostNick) >>= BS.putStrLn
     GotMessage msg -> do
       nick <- atomically $ readTVar hostNick
       broadcast server Nothing (BS.concat [nick, BS.pack ": ", msg])
-handleMessage server@Server{clients} (FromClient clientId message) =
+
+handleClientMessage :: Server -> Int -> Message -> IO ()
+handleClientMessage server@Server{clients} clientId message =
   case message of
-    Quit -> do
-      clients' <- (atomically $ readTVar clients)
-      Connection{nick, conn} <- maybe (failIO $ "Client " ++ show clientId ++ " not found") pure $ Map.lookup clientId clients'
-      msg <- case nick of
-        Just n -> return $ BS.concat [n, BS.pack " quit the server"]
-        Nothing -> return $ BS.pack $ "User " ++ (show clientId) ++ " quit the server"
-      -- Close client conn and remove from client maps
-      hClose conn
-      atomically $ modifyTVar clients (Map.delete clientId)
-      -- Broadcast to other users that client has left
-      broadcast server (Just clientId) msg
-    SetNick newNick -> do
-      clients' <- (atomically $ readTVar clients)
-      msg <-
-        maybe
-          (return $ BS.concat [BS.pack $ "User " ++ (show clientId) ++ " changed their nick to ", newNick])
-          (\oldNick -> pure $ BS.concat [BS.pack "Client \'", oldNick, BS.pack "\' changed their nick to \'", newNick, BS.pack "\'"])
-          (Map.lookup clientId clients' >>= nick)
-      atomically $ modifyTVar clients (Map.adjust (\conn -> conn{nick = Just newNick}) clientId)
-      broadcast server (Just clientId) msg
-    ShowNick -> do
-      clients' <- (atomically $ readTVar clients)
-      Connection{nick, conn} <- maybe (failIO $ "Client " ++ show clientId ++ " not found") pure $ Map.lookup clientId clients'
-      BS.hPutStrLn conn $ maybe (BS.pack $ "User " ++ show clientId) id nick
-    GotMessage msg -> do
-      clients' <- (atomically $ readTVar clients)
-      withNick <- maybe (pure $ msg) (\nick -> pure $ BS.concat [nick, BS.pack ": ", msg]) (Map.lookup clientId clients' >>= nick)
-      BS.putStrLn withNick
-      hFlush stdout
-      withoutSender <- Map.delete clientId <$> (atomically $ readTVar clients)
-      forM_ (Map.elems withoutSender) $ \Connection{conn} -> BS.hPutStrLn conn withNick
+    Quit -> quitClient
+    SetNick newNick -> setNewNick newNick
+    ShowNick -> echoNick
+    GotMessage msg -> broadcastMessage msg
+ where
+  quitClient = do
+    clients' <- (atomically $ readTVar clients)
+    Connection{nick, conn} <- maybe (failIO $ "Client " ++ show clientId ++ " not found") pure $ Map.lookup clientId clients'
+    msg <- case nick of
+      Just n -> return $ BS.concat [n, BS.pack " quit the server"]
+      Nothing -> return $ BS.pack $ "User " ++ (show clientId) ++ " quit the server"
+    -- Close client conn and remove from client maps
+    hClose conn
+    atomically $ modifyTVar clients (Map.delete clientId)
+    -- Broadcast to other users that client has left
+    broadcast server (Just clientId) msg
+  setNewNick newNick = do
+    clients' <- (atomically $ readTVar clients)
+    msg <-
+      maybe
+        (return $ BS.concat [BS.pack $ "User " ++ (show clientId) ++ " changed their nick to ", newNick])
+        (\oldNick -> pure $ BS.concat [BS.pack "Client \'", oldNick, BS.pack "\' changed their nick to \'", newNick, BS.pack "\'"])
+        (Map.lookup clientId clients' >>= nick)
+    atomically $ modifyTVar clients (Map.adjust (\conn -> conn{nick = Just newNick}) clientId)
+    broadcast server (Just clientId) msg
+  echoNick = do
+    clients' <- (atomically $ readTVar clients)
+    Connection{nick, conn} <- maybe (failIO $ "Client " ++ show clientId ++ " not found") pure $ Map.lookup clientId clients'
+    BS.hPutStrLn conn $ maybe (BS.pack $ "User " ++ show clientId) id nick
+  broadcastMessage msg = do
+    clients' <- (atomically $ readTVar clients)
+    withNick <- maybe (pure $ msg) (\nick -> pure $ BS.concat [nick, BS.pack ": ", msg]) (Map.lookup clientId clients' >>= nick)
+    BS.putStrLn withNick
+    hFlush stdout
+    withoutSender <- Map.delete clientId <$> (atomically $ readTVar clients)
+    forM_ (Map.elems withoutSender) $ \Connection{conn} -> BS.hPutStrLn conn withNick
 
 handleClient :: TQueue MessageSource -> Connection -> IO ()
 handleClient mailbox Connection{conn, clientId} = do
