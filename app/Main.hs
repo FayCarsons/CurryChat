@@ -5,7 +5,7 @@ module Main where
 
 import qualified Client
 import qualified Common
-import Data.List (findIndex)
+import Data.List (elemIndex)
 import qualified Host
 import Options.Applicative
 import Text.Read (readEither)
@@ -16,7 +16,7 @@ host :: Parser Mode
 host =
   Host
     <$> option
-      (eitherReader $ readEither)
+      (eitherReader readEither)
       (long "host" <> short 'h' <> metavar "port" <> help "Start the application in host mode running on specified port")
 
 client :: Parser Mode
@@ -29,7 +29,7 @@ client =
   parseClientParams =
     eitherReader
       ( \s ->
-          case findIndex (== ':') s of
+          case elemIndex ':' s of
             Just splitPoint ->
               let (uri, unparsedPort) = splitAt splitPoint s
                in readEither (drop 1 unparsedPort) >>= \port -> Right (Client uri port)

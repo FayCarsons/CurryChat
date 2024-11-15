@@ -14,6 +14,7 @@ import Data.ByteString.Char8 (ByteString)
 import qualified Data.ByteString.Char8 as BS
 import Data.IntMap.Strict (IntMap)
 import qualified Data.IntMap.Strict as Map
+import Data.Maybe (fromMaybe)
 import GHC.Base (failIO)
 import Network.Socket
 import System.IO (BufferMode (NoBuffering), Handle, IOMode (ReadWriteMode), hClose, hFlush, hGetLine, hSetBuffering, stdin, stdout)
@@ -42,10 +43,10 @@ data Server
 
 newServer :: Socket -> IO Server
 newServer sock = do
-  numClients <- atomically $ newTVar 0
-  clients <- atomically $ newTVar Map.empty
-  mailbox <- atomically $ newTQueue
-  hostNick <- atomically $ newTVar (BS.pack "Host")
+  numClients <- newTVarIO 0
+  clients <- newTVarIO Map.empty
+  mailbox <- atomically newTQueue
+  hostNick <- newTVarIO $ BS.pack "Host"
   return Server{sock, hostNick, numClients, clients, mailbox}
 
 runHost :: Int -> IO ()
@@ -57,7 +58,7 @@ runHost port = do
   hSetBuffering stdout NoBuffering
   server <- newServer sock
   _ <- forkIO $ fix $ \loop ->
-    hGetLine stdin >>= pure . Common.parseMessage >>= \case
+    Common.parseMessage <$> getLine >>= \case
       Just message -> do
         atomically $ writeTQueue (mailbox server) (FromHost message)
         loop
@@ -66,14 +67,15 @@ runHost port = do
   _ <- forkIO $ fix $ clientListener server
   run server
  where
+  -- Listens for new clients, when a client is received it handles it with
+  -- handleClient
   clientListener Server{sock, clients, numClients, mailbox} loop = do
     atomically $ modifyTVar numClients succ
-    clientId <- atomically $ readTVar numClients
-    putStrLn "Accepting a new client"
+    clientId <- readTVarIO numClients
     (clientSock, addr) <- accept sock
     conn <- socketToHandle clientSock ReadWriteMode
     hSetBuffering conn NoBuffering
-    putStrLn $ "Got client: " ++ (show addr)
+    putStrLn $ "Got client: " ++ show addr
     let client' = Connection{clientId, conn, nick = Nothing}
     atomically $ modifyTVar clients (Map.insert clientId client')
     _ <- forkIO $ handleClient mailbox client'
@@ -86,7 +88,7 @@ runHost port = do
 
 broadcast :: Server -> Maybe Int -> ByteString -> IO ()
 broadcast Server{clients} except message = do
-  clients' <- (atomically $ readTVar clients)
+  clients' <- readTVarIO clients
   let withoutSender = Map.elems $ case except of
         Just clientId -> Map.delete clientId clients'
         Nothing -> clients'
@@ -100,14 +102,14 @@ handleServerMessage :: Server -> Message -> IO ()
 handleServerMessage server@Server{hostNick, clients} message =
   case message of
     Quit -> do
-      nick <- atomically $ readTVar hostNick
+      nick <- readTVarIO hostNick
       broadcast server Nothing (BS.concat [nick, BS.pack "(host) closed room, byebye :P"])
-      clients' <- Map.elems <$> (atomically $ readTVar clients)
+      clients' <- Map.elems <$> readTVarIO clients
       forM_ clients' $ \Connection{conn} -> BS.hPutStrLn conn (BS.pack "Host closed room, byebye :P") *> hClose conn
     SetNick nick -> atomically $ modifyTVar hostNick (const nick)
-    ShowNick -> (atomically $ readTVar hostNick) >>= BS.putStrLn
+    ShowNick -> readTVarIO hostNick >>= BS.putStrLn
     GotMessage msg -> do
-      nick <- atomically $ readTVar hostNick
+      nick <- readTVarIO hostNick
       broadcast server Nothing (BS.concat [nick, BS.pack ": ", msg])
 
 handleClientMessage :: Server -> Int -> Message -> IO ()
@@ -119,45 +121,50 @@ handleClientMessage server@Server{clients} clientId message =
     GotMessage msg -> broadcastMessage msg
  where
   quitClient = do
-    clients' <- (atomically $ readTVar clients)
+    clients' <- readTVarIO clients
     Connection{nick, conn} <- maybe (failIO $ "Client " ++ show clientId ++ " not found") pure $ Map.lookup clientId clients'
     msg <- case nick of
       Just n -> return $ BS.concat [n, BS.pack " quit the server"]
-      Nothing -> return $ BS.pack $ "User " ++ (show clientId) ++ " quit the server"
+      Nothing -> return $ BS.pack $ "User " ++ show clientId ++ " quit the server"
     -- Close client conn and remove from client maps
     hClose conn
     atomically $ modifyTVar clients (Map.delete clientId)
-    -- Broadcast to other users that client has left
+    -- Broadcast to host and other users that client has left
+    BS.putStrLn msg
     broadcast server (Just clientId) msg
   setNewNick newNick = do
-    clients' <- (atomically $ readTVar clients)
+    clients' <- readTVarIO clients
     msg <-
       maybe
-        (return $ BS.concat [BS.pack $ "User " ++ (show clientId) ++ " changed their nick to ", newNick])
+        (return $ BS.concat [BS.pack $ "User " ++ show clientId ++ " changed their nick to ", newNick])
         (\oldNick -> pure $ BS.concat [BS.pack "Client \'", oldNick, BS.pack "\' changed their nick to \'", newNick, BS.pack "\'"])
         (Map.lookup clientId clients' >>= nick)
     atomically $ modifyTVar clients (Map.adjust (\conn -> conn{nick = Just newNick}) clientId)
     broadcast server (Just clientId) msg
   echoNick = do
-    clients' <- (atomically $ readTVar clients)
+    clients' <- readTVarIO clients
     Connection{nick, conn} <- maybe (failIO $ "Client " ++ show clientId ++ " not found") pure $ Map.lookup clientId clients'
-    BS.hPutStrLn conn $ maybe (BS.pack $ "User " ++ show clientId) id nick
+    BS.hPutStrLn conn $ fromMaybe (BS.pack $ "User " ++ show clientId) nick
   broadcastMessage msg = do
-    clients' <- (atomically $ readTVar clients)
-    withNick <- maybe (pure $ msg) (\nick -> pure $ BS.concat [nick, BS.pack ": ", msg]) (Map.lookup clientId clients' >>= nick)
+    clients' <- readTVarIO clients
+    withNick <-
+      maybe
+        (pure msg)
+        (\nick -> pure $ BS.concat [nick, BS.pack ": ", msg])
+        (Map.lookup clientId clients' >>= nick)
     BS.putStrLn withNick
     hFlush stdout
-    withoutSender <- Map.delete clientId <$> (atomically $ readTVar clients)
+    withoutSender <- Map.delete clientId <$> readTVarIO clients
     forM_ (Map.elems withoutSender) $ \Connection{conn} -> BS.hPutStrLn conn withNick
 
 handleClient :: TQueue MessageSource -> Connection -> IO ()
 handleClient mailbox Connection{conn, clientId} = do
-  fix $ \loop -> do
-    hGetLine conn >>= pure . Common.parseMessage >>= \case
+  fix $ \continue -> do
+    Common.parseMessage <$> hGetLine conn >>= \case
       Just Quit -> do
         atomically $ writeTQueue mailbox (FromClient clientId Quit)
         return ()
       Just message -> do
-        atomically $ (writeTQueue mailbox (FromClient clientId message))
-        loop
-      Nothing -> loop
+        atomically $ writeTQueue mailbox (FromClient clientId message)
+        continue
+      Nothing -> continue
